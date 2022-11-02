@@ -1,0 +1,11 @@
+
+10242022-010759 - Prompt: Green cow on the moon with a Tommy Gun in Zoot suit - Seed: 12018214990700 (87.07076096534729s)
+10242022-011205 - Prompt: A Green Cow in black zoot suit - Seed: 12263824845000 (58.827027320861816s)
+10242022-011413 - Prompt: A green cow wearing black zoot suit, portrait - Seed: 12392312127200 (58.95515060424805s)
+10242022-011619 - Prompt: a fat green cow wearing a black zoot suit in the city - Seed: 12518080424600 (58.95175909996033s)
+10262022-213233 - Prompt: in firework style, a photorealistic portrait, centered, upper body and hips, facing slight left, gigantic battletech mechwarrior in matte black - Seed: 258295832086700 (65.00767397880554s)
+10262022-213338 - Prompt: in firework style, a photorealistic portrait, centered, upper body and hips, facing slight left, gigantic battletech mechwarrior in matte black - Seed: 258360843154900 (59.17251992225647s)
+10262022-214530 - Prompt: a photorealistic portrait, centered, upper body and hips, facing slight left, gigantic battletech mechwarrior in matte black with three identical (glossy red hyperdetailed circular, chinese serpentine dragon insignia in style of vector art) - Seed: 259072782559200 (23.87940001487732s)
+10262022-214554 - Prompt: a photorealistic portrait, centered, upper body and hips, facing slight left, gigantic battletech mechwarrior in matte black with three identical (glossy red hyperdetailed circular, chinese serpentine dragon insignia in style of vector art) - Seed: 259096662285400 (22.948007345199585s)
+10262022-214741 - Prompt: a photorealistic portrait, centered, upper body and hips, facing slight left, gigantic battletech mechwarrior in matte black with three identical (glossy red hyperdetailed circular, chinese serpentine dragon insignia in style of vector art) - Seed: 259203710751100 (177.75087928771973s)
+10262022-215039 - Prompt: a photorealistic portrait, centered, upper body and hips, facing slight left, gigantic battletech mechwarrior in matte black with three identical (glossy red hyperdetailed circular, chinese serpentine dragon insignia in style of vector art) - Seed: 259381461765700 (176.06324887275696s)

@@ -11,8 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from typing import Union
+import warnings
+from dataclasses import dataclass
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -20,51 +21,118 @@ import torch
 from scipy import integrate
 
 from ..configuration_utils import ConfigMixin, register_to_config
+from ..utils import BaseOutput, deprecate
 from .scheduling_utils import SchedulerMixin
 
 
+@dataclass
+class LMSDiscreteSchedulerOutput(BaseOutput):
+    """
+    Output class for the scheduler's step function output.
+
+    Args:
+        prev_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
+            Computed sample (x_{t-1}) of previous timestep. `prev_sample` should be used as next model input in the
+            denoising loop.
+        pred_original_sample (`torch.FloatTensor` of shape `(batch_size, num_channels, height, width)` for images):
+            The predicted denoised sample (x_{0}) based on the model output from the current timestep.
+            `pred_original_sample` can be used to preview progress or for guidance.
+    """
+
+    prev_sample: torch.FloatTensor
+    pred_original_sample: Optional[torch.FloatTensor] = None
+
+
 class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
+    """
+    Linear Multistep Scheduler for discrete beta schedules. Based on the original k-diffusion implementation by
+    Katherine Crowson:
+    https://github.com/crowsonkb/k-diffusion/blob/481677d114f6ea445aa009cf5bd7a9cdee909e47/k_diffusion/sampling.py#L181
+
+    [`~ConfigMixin`] takes care of storing all config attributes that are passed in the scheduler's `__init__`
+    function, such as `num_train_timesteps`. They can be accessed via `scheduler.config.num_train_timesteps`.
+    [`~ConfigMixin`] also provides general loading and saving functionality via the [`~ConfigMixin.save_config`] and
+    [`~ConfigMixin.from_config`] functions.
+
+    Args:
+        num_train_timesteps (`int`): number of diffusion steps used to train the model.
+        beta_start (`float`): the starting `beta` value of inference.
+        beta_end (`float`): the final `beta` value.
+        beta_schedule (`str`):
+            the beta schedule, a mapping from a beta range to a sequence of betas for stepping the model. Choose from
+            `linear` or `scaled_linear`.
+        trained_betas (`np.ndarray`, optional):
+            option to pass an array of betas directly to the constructor to bypass `beta_start`, `beta_end` etc.
+
+    """
+
     @register_to_config
     def __init__(
         self,
-        num_train_timesteps=1000,
-        beta_start=0.0001,
-        beta_end=0.02,
-        beta_schedule="linear",
-        trained_betas=None,
-        timestep_values=None,
-        tensor_format="pt",
+        num_train_timesteps: int = 1000,
+        beta_start: float = 0.0001,
+        beta_end: float = 0.02,
+        beta_schedule: str = "linear",
+        trained_betas: Optional[np.ndarray] = None,
     ):
-        """
-        Linear Multistep Scheduler for discrete beta schedules. Based on the original k-diffusion implementation by
-        Katherine Crowson:
-        https://github.com/crowsonkb/k-diffusion/blob/481677d114f6ea445aa009cf5bd7a9cdee909e47/k_diffusion/sampling.py#L181
-        """
-
-        if beta_schedule == "linear":
-            self.betas = np.linspace(beta_start, beta_end, num_train_timesteps, dtype=np.float32)
+        if trained_betas is not None:
+            self.betas = torch.from_numpy(trained_betas)
+        elif beta_schedule == "linear":
+            self.betas = torch.linspace(beta_start, beta_end, num_train_timesteps, dtype=torch.float32)
         elif beta_schedule == "scaled_linear":
             # this schedule is very specific to the latent diffusion model.
-            self.betas = np.linspace(beta_start**0.5, beta_end**0.5, num_train_timesteps, dtype=np.float32) ** 2
+            self.betas = (
+                torch.linspace(beta_start**0.5, beta_end**0.5, num_train_timesteps, dtype=torch.float32) ** 2
+            )
         else:
             raise NotImplementedError(f"{beta_schedule} does is not implemented for {self.__class__}")
 
         self.alphas = 1.0 - self.betas
-        self.alphas_cumprod = np.cumprod(self.alphas, axis=0)
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
 
-        self.sigmas = ((1 - self.alphas_cumprod) / self.alphas_cumprod) ** 0.5
+        sigmas = np.array(((1 - self.alphas_cumprod) / self.alphas_cumprod) ** 0.5)
+        sigmas = np.concatenate([sigmas[::-1], [0.0]]).astype(np.float32)
+        self.sigmas = torch.from_numpy(sigmas)
+
+        # standard deviation of the initial noise distribution
+        self.init_noise_sigma = self.sigmas.max()
 
         # setable values
         self.num_inference_steps = None
-        self.timesteps = np.arange(0, num_train_timesteps)[::-1].copy()
+        timesteps = np.linspace(0, num_train_timesteps - 1, num_train_timesteps, dtype=float)[::-1].copy()
+        self.timesteps = torch.from_numpy(timesteps)
         self.derivatives = []
+        self.is_scale_input_called = False
 
-        self.tensor_format = tensor_format
-        self.set_format(tensor_format=tensor_format)
+    def scale_model_input(
+        self, sample: torch.FloatTensor, timestep: Union[float, torch.FloatTensor]
+    ) -> torch.FloatTensor:
+        """
+        Scales the denoising model input by `(sigma**2 + 1) ** 0.5` to match the K-LMS algorithm.
+
+        Args:
+            sample (`torch.FloatTensor`): input sample
+            timestep (`float` or `torch.FloatTensor`): the current timestep in the diffusion chain
+
+        Returns:
+            `torch.FloatTensor`: scaled input sample
+        """
+        if isinstance(timestep, torch.Tensor):
+            timestep = timestep.to(self.timesteps.device)
+        step_index = (self.timesteps == timestep).nonzero().item()
+        sigma = self.sigmas[step_index]
+        sample = sample / ((sigma**2 + 1) ** 0.5)
+        self.is_scale_input_called = True
+        return sample
 
     def get_lms_coefficient(self, order, t, current_order):
         """
-        Compute a linear multistep coefficient
+        Compute a linear multistep coefficient.
+
+        Args:
+            order (TODO):
+            t (TODO):
+            current_order (TODO):
         """
 
         def lms_derivative(tau):
@@ -79,29 +147,78 @@ class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
 
         return integrated_coeff
 
-    def set_timesteps(self, num_inference_steps):
-        self.num_inference_steps = num_inference_steps
-        self.timesteps = np.linspace(self.num_train_timesteps - 1, 0, num_inference_steps, dtype=float)
+    def set_timesteps(self, num_inference_steps: int, device: Union[str, torch.device] = None):
+        """
+        Sets the timesteps used for the diffusion chain. Supporting function to be run before inference.
 
-        low_idx = np.floor(self.timesteps).astype(int)
-        high_idx = np.ceil(self.timesteps).astype(int)
-        frac = np.mod(self.timesteps, 1.0)
+        Args:
+            num_inference_steps (`int`):
+                the number of diffusion steps used when generating samples with a pre-trained model.
+            device (`str` or `torch.device`, optional):
+                the device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
+        """
+        self.num_inference_steps = num_inference_steps
+
+        timesteps = np.linspace(0, self.config.num_train_timesteps - 1, num_inference_steps, dtype=float)[::-1].copy()
         sigmas = np.array(((1 - self.alphas_cumprod) / self.alphas_cumprod) ** 0.5)
-        sigmas = (1 - frac) * sigmas[low_idx] + frac * sigmas[high_idx]
-        self.sigmas = np.concatenate([sigmas, [0.0]])
+        sigmas = np.interp(timesteps, np.arange(0, len(sigmas)), sigmas)
+        sigmas = np.concatenate([sigmas, [0.0]]).astype(np.float32)
+        self.sigmas = torch.from_numpy(sigmas).to(device=device)
+        self.timesteps = torch.from_numpy(timesteps).to(device=device)
 
         self.derivatives = []
 
-        self.set_format(tensor_format=self.tensor_format)
-
     def step(
         self,
-        model_output: Union[torch.FloatTensor, np.ndarray],
-        timestep: int,
-        sample: Union[torch.FloatTensor, np.ndarray],
+        model_output: torch.FloatTensor,
+        timestep: Union[float, torch.FloatTensor],
+        sample: torch.FloatTensor,
         order: int = 4,
-    ):
-        sigma = self.sigmas[timestep]
+        return_dict: bool = True,
+    ) -> Union[LMSDiscreteSchedulerOutput, Tuple]:
+        """
+        Predict the sample at the previous timestep by reversing the SDE. Core function to propagate the diffusion
+        process from the learned model outputs (most often the predicted noise).
+
+        Args:
+            model_output (`torch.FloatTensor`): direct output from learned diffusion model.
+            timestep (`float`): current timestep in the diffusion chain.
+            sample (`torch.FloatTensor`):
+                current instance of sample being created by diffusion process.
+            order: coefficient for multi-step inference.
+            return_dict (`bool`): option for returning tuple rather than LMSDiscreteSchedulerOutput class
+
+        Returns:
+            [`~schedulers.scheduling_utils.LMSDiscreteSchedulerOutput`] or `tuple`:
+            [`~schedulers.scheduling_utils.LMSDiscreteSchedulerOutput`] if `return_dict` is True, otherwise a `tuple`.
+            When returning a tuple, the first element is the sample tensor.
+
+        """
+        if not self.is_scale_input_called:
+            warnings.warn(
+                "The `scale_model_input` function should be called before `step` to ensure correct denoising. "
+                "See `StableDiffusionPipeline` for a usage example."
+            )
+
+        if isinstance(timestep, torch.Tensor):
+            timestep = timestep.to(self.timesteps.device)
+        if (
+            isinstance(timestep, int)
+            or isinstance(timestep, torch.IntTensor)
+            or isinstance(timestep, torch.LongTensor)
+        ):
+            deprecate(
+                "timestep as an index",
+                "0.7.0",
+                "Passing integer indices (e.g. from `enumerate(timesteps)`) as timesteps to"
+                " `LMSDiscreteScheduler.step()` will not be supported in future versions. Make sure to pass"
+                " one of the `scheduler.timesteps` as a timestep.",
+                standard_warn=False,
+            )
+            step_index = timestep
+        else:
+            step_index = (self.timesteps == timestep).nonzero().item()
+        sigma = self.sigmas[step_index]
 
         # 1. compute predicted original sample (x_0) from sigma-scaled predicted noise
         pred_original_sample = sample - sigma * model_output
@@ -113,20 +230,50 @@ class LMSDiscreteScheduler(SchedulerMixin, ConfigMixin):
             self.derivatives.pop(0)
 
         # 3. Compute linear multistep coefficients
-        order = min(timestep + 1, order)
-        lms_coeffs = [self.get_lms_coefficient(order, timestep, curr_order) for curr_order in range(order)]
+        order = min(step_index + 1, order)
+        lms_coeffs = [self.get_lms_coefficient(order, step_index, curr_order) for curr_order in range(order)]
 
         # 4. Compute previous sample based on the derivatives path
         prev_sample = sample + sum(
             coeff * derivative for coeff, derivative in zip(lms_coeffs, reversed(self.derivatives))
         )
 
-        return {"prev_sample": prev_sample}
+        if not return_dict:
+            return (prev_sample,)
 
-    def add_noise(self, original_samples, noise, timesteps):
-        sigmas = self.match_shape(self.sigmas[timesteps], noise)
-        noisy_samples = original_samples + noise * sigmas
+        return LMSDiscreteSchedulerOutput(prev_sample=prev_sample, pred_original_sample=pred_original_sample)
 
+    def add_noise(
+        self,
+        original_samples: torch.FloatTensor,
+        noise: torch.FloatTensor,
+        timesteps: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        # Make sure sigmas and timesteps have the same device and dtype as original_samples
+        self.sigmas = self.sigmas.to(device=original_samples.device, dtype=original_samples.dtype)
+        self.timesteps = self.timesteps.to(original_samples.device)
+        timesteps = timesteps.to(original_samples.device)
+
+        schedule_timesteps = self.timesteps
+
+        if isinstance(timesteps, torch.IntTensor) or isinstance(timesteps, torch.LongTensor):
+            deprecate(
+                "timesteps as indices",
+                "0.7.0",
+                "Passing integer indices  (e.g. from `enumerate(timesteps)`) as timesteps to"
+                " `LMSDiscreteScheduler.add_noise()` will not be supported in future versions. Make sure to"
+                " pass values from `scheduler.timesteps` as timesteps.",
+                standard_warn=False,
+            )
+            step_indices = timesteps
+        else:
+            step_indices = [(schedule_timesteps == t).nonzero().item() for t in timesteps]
+
+        sigma = self.sigmas[step_indices].flatten()
+        while len(sigma.shape) < len(original_samples.shape):
+            sigma = sigma.unsqueeze(-1)
+
+        noisy_samples = original_samples + noise * sigma
         return noisy_samples
 
     def __len__(self):

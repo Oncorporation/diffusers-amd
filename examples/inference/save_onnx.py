@@ -2,6 +2,7 @@ from pathlib import Path
 from diffusers import StableDiffusionPipeline, LMSDiscreteScheduler
 import torch
 from transformers import CLIPTextModel
+from optimum.onnxruntime import ORTModelForSequenceClassification
 
 
 text_encoder = CLIPTextModel.from_pretrained("openai/clip-vit-large-patch14", return_dict=False)
@@ -13,7 +14,13 @@ lms = LMSDiscreteScheduler(
     beta_schedule="scaled_linear"
 )
 
-pipe = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", scheduler=lms, use_auth_token=True)
+v14 = "CompVis/stable-diffusion-v1-4"
+v15 = "runwayml/stable-diffusion-v1-5"
+v15pd = "g://projects//stable-diffusion-webui-amd//models//Stable-diffusion//v1-5-pruned.ckpt"
+v15inpd = "g://projects//stable-diffusion-webui-amd//models//Stable-diffusion//sd-v1-5-inpainting.ckpt"
+v15inp = "runwayml/stable-diffusion-inpainting"
+ 
+pipe = StableDiffusionPipeline.from_pretrained(v15, scheduler=lms, use_auth_token=True)
 
 def convert_to_onnx(unet, post_quant_conv, decoder, text_encoder, height=512, width=512):
     """Convert given input models to onnx files.
@@ -63,7 +70,7 @@ def convert_to_onnx(unet, post_quant_conv, decoder, text_encoder, height=512, wi
     
 
 # Change height and width to create ONNX model file for that size
-convert_to_onnx(pipe.unet, pipe.vae.post_quant_conv, pipe.vae.decoder, text_encoder, height=576, width=576)
+convert_to_onnx(pipe.unet, pipe.vae.post_quant_conv, pipe.vae.decoder, text_encoder, height=512, width=512)
 
 # For example, create an onnx model with height=512 and width=768
 # convert_to_onnx(pipe.unet, pipe.vae.post_quant_conv, pipe.vae.decoder, text_encoder, height=512, width=768)

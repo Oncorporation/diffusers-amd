@@ -165,3 +165,5 @@ tags
 # DS_Store (MacOS)
 .DS_Store
 /examples/inference/onnx
+/examples/inference/output
+/examples/inference/New Text Document.txt

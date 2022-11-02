@@ -1,7 +1,9 @@
 import inspect
 import warnings
 from typing import List, Optional, Union
+from pathlib import Path
 
+import click
 import torch
 import numpy as np
 from tqdm.auto import tqdm
@@ -11,6 +13,8 @@ from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipeline_utils import DiffusionPipeline
 from diffusers.schedulers import DDIMScheduler, LMSDiscreteScheduler, PNDMScheduler
 # from diffusers import StableDiffusionSafetyChecker
+#from diffusers import StableDiffusionOnnxPipeline
+from diffusers import OnnxStableDiffusionPipeline
 
 
 class StableDiffusionPipeline(DiffusionPipeline):
@@ -201,14 +205,28 @@ class StableDiffusionPipeline(DiffusionPipeline):
 
         return {"sample": image,}# "nsfw_content_detected": has_nsfw_concept}
 
-
+onnxpath = Path("G:\Projects\Stable-Diffusion-webui-amd\models\onnx")
+#"CompVis/stable-diffusion-v1-4"
 lms = LMSDiscreteScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear")
-pipe = StableDiffusionPipeline.from_pretrained("CompVis/stable-diffusion-v1-4", scheduler=lms, use_auth_token=True)
+ddim = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", num_train_timesteps=1000)
+
+#pipe = StableDiffusionPipeline.from_pretrained(onnxpath, scheduler=lms, use_auth_token=True)
+#pipe = StableDiffusionPipeline.from_pretrained(onnxpath, scheduler=lms, provider="DmlExecutionProvider")
+pipe = OnnxStableDiffusionPipeline.from_pretrained(onnxpath, provider="DmlExecutionProvider", scheduler=lms, torch_dtype=torch.float16)
 pipe.safety_checker = lambda images, **kwargs: (images, [False] * len(images))
 torch.manual_seed(8008)
+height = 512
+width = 512
+generator = torch.Generator()
+seed = generator.seed()
+generator = generator.manual_seed(seed)
+latents = torch.randn(
+    (1, 4, height // 8, width // 8),
+    generator = generator
+)
 
 prompt = "8bit mos eisley cantina, a tiny transparent glass illuminates statue [a full body shot photo of a translucent [Princess Leia hologram], movie still, [halluzinogenic, translucent!, Opalescent crystal, transparent!, glass skin, blue illumination, blue glow]:0.7] 'on top of table'"
-image = pipe(prompt, height=512, width=512, num_inference_steps=45, guidance_scale=7.5, eta=0.0, execution_provider="DmlExecutionProvider")["sample"][0]
+image = pipe(prompt, height, width, num_inference_steps=30, guidance_scale=7.5, negative_prompt="", eta=0.0, latents = latents, execution_provider="DmlExecutionProvider")["sample"][0]
 image.save("holo_512.png")
 
 # Works on AMD Windows platform
@@ -219,4 +237,4 @@ image.save("holo_512.png")
 
 # prompt = "a photo of an astronaut riding a horse on mars"
 # image = pipe(prompt, height=512, width=768, num_inference_steps=50, guidance_scale=7.5, eta=0.0, execution_provider="DmlExecutionProvider")["sample"][0]
-# image.save("pl_1.png")
+# image.save("pl_lms.png")

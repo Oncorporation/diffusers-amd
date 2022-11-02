@@ -136,12 +136,35 @@ except importlib_metadata.PackageNotFoundError:
     _modelcards_available = False
 
 
+_onnx_available = importlib.util.find_spec("onnxruntime") is not None
+if _onnx_available:
+    candidates = ("onnxruntime", "onnxruntime-gpu", "onnxruntime-directml", "onnxruntime-openvino")
+    _onnxruntime_version = None
+    # For the metadata, we have to look for both onnxruntime and onnxruntime-gpu
+    for pkg in candidates:
+        try:
+            _onnxruntime_version = importlib_metadata.version(pkg)
+            break
+        except importlib_metadata.PackageNotFoundError:
+            pass
+    _onnx_available = _onnxruntime_version is not None
+    if _onnx_available:
+        logger.debug(f"Successfully imported onnxruntime version {_onnxruntime_version}")
+
+
 _scipy_available = importlib.util.find_spec("scipy") is not None
 try:
     _scipy_version = importlib_metadata.version("scipy")
     logger.debug(f"Successfully imported transformers version {_scipy_version}")
 except importlib_metadata.PackageNotFoundError:
     _scipy_available = False
+
+_accelerate_available = importlib.util.find_spec("accelerate") is not None
+try:
+    _accelerate_version = importlib_metadata.version("accelerate")
+    logger.debug(f"Successfully imported accelerate version {_accelerate_version}")
+except importlib_metadata.PackageNotFoundError:
+    _accelerate_available = False
 
 
 def is_torch_available():
@@ -172,8 +195,16 @@ def is_modelcards_available():
     return _modelcards_available
 
 
+def is_onnx_available():
+    return _onnx_available
+
+
 def is_scipy_available():
     return _scipy_available
+
+
+def is_accelerate_available():
+    return _accelerate_available
 
 
 # docstyle-ignore
@@ -192,6 +223,12 @@ inflect`
 PYTORCH_IMPORT_ERROR = """
 {0} requires the PyTorch library but it was not found in your environment. Checkout the instructions on the
 installation page: https://pytorch.org/get-started/locally/ and follow the ones that match your environment.
+"""
+
+# docstyle-ignore
+ONNX_IMPORT_ERROR = """
+{0} requires the onnxruntime library but it was not found in your environment. You can install it with pip: `pip
+install onnxruntime`
 """
 
 # docstyle-ignore
@@ -223,6 +260,7 @@ BACKENDS_MAPPING = OrderedDict(
     [
         ("flax", (is_flax_available, FLAX_IMPORT_ERROR)),
         ("inflect", (is_inflect_available, INFLECT_IMPORT_ERROR)),
+        ("onnx", (is_onnx_available, ONNX_IMPORT_ERROR)),
         ("scipy", (is_scipy_available, SCIPY_IMPORT_ERROR)),
         ("tf", (is_tf_available, TENSORFLOW_IMPORT_ERROR)),
         ("torch", (is_torch_available, PYTORCH_IMPORT_ERROR)),

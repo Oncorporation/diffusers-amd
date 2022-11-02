@@ -15,19 +15,19 @@
 # limitations under the License.
 
 import os
+from functools import partial
 from typing import Callable, List, Optional, Tuple, Union
 
 import torch
 from torch import Tensor, device
 
+from diffusers.utils import is_accelerate_available
 from huggingface_hub import hf_hub_download
 from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError
 from requests import HTTPError
 
-from .utils import CONFIG_NAME, DIFFUSERS_CACHE, HUGGINGFACE_CO_RESOLVE_ENDPOINT, logging
-
-
-WEIGHTS_NAME = "diffusion_pytorch_model.bin"
+from . import __version__
+from .utils import CONFIG_NAME, DIFFUSERS_CACHE, HUGGINGFACE_CO_RESOLVE_ENDPOINT, WEIGHTS_NAME, logging
 
 
 logger = logging.get_logger(__name__)
@@ -117,44 +117,58 @@ class ModelMixin(torch.nn.Module):
     Base class for all models.
 
     [`ModelMixin`] takes care of storing the configuration of the models and handles methods for loading, downloading
-    and saving models as well as a few methods common to all models to:
+    and saving models.
 
-        - resize the input embeddings,
-        - prune heads in the self-attention heads.
-
-    Class attributes (overridden by derived classes):
-
-        - **config_class** ([`ConfigMixin`]) -- A subclass of [`ConfigMixin`] to use as configuration class for this
-          model architecture.
-        - **load_tf_weights** (`Callable`) -- A python *method* for loading a TensorFlow checkpoint in a PyTorch model,
-          taking as arguments:
-
-            - **model** ([`ModelMixin`]) -- An instance of the model on which to load the TensorFlow checkpoint.
-            - **config** ([`PreTrainedConfigMixin`]) -- An instance of the configuration associated to the model.
-            - **path** (`str`) -- A path to the TensorFlow checkpoint.
-
-        - **base_model_prefix** (`str`) -- A string indicating the attribute associated to the base model in derived
-          classes of the same architecture adding modules on top of the base model.
-        - **is_parallelizable** (`bool`) -- A flag indicating whether this model supports model parallelization.
-        - **main_input_name** (`str`) -- The name of the principal input to the model (often `input_ids` for NLP
-          models, `pixel_values` for vision models and `input_values` for speech models).
+        - **config_name** ([`str`]) -- A filename under which the model should be stored when calling
+          [`~modeling_utils.ModelMixin.save_pretrained`].
     """
     config_name = CONFIG_NAME
     _automatically_saved_args = ["_diffusers_version", "_class_name", "_name_or_path"]
+    _supports_gradient_checkpointing = False
 
     def __init__(self):
         super().__init__()
+
+    @property
+    def is_gradient_checkpointing(self) -> bool:
+        """
+        Whether gradient checkpointing is activated for this model or not.
+
+        Note that in other frameworks this feature can be referred to as "activation checkpointing" or "checkpoint
+        activations".
+        """
+        return any(hasattr(m, "gradient_checkpointing") and m.gradient_checkpointing for m in self.modules())
+
+    def enable_gradient_checkpointing(self):
+        """
+        Activates gradient checkpointing for the current model.
+
+        Note that in other frameworks this feature can be referred to as "activation checkpointing" or "checkpoint
+        activations".
+        """
+        if not self._supports_gradient_checkpointing:
+            raise ValueError(f"{self.__class__.__name__} does not support gradient checkpointing.")
+        self.apply(partial(self._set_gradient_checkpointing, value=True))
+
+    def disable_gradient_checkpointing(self):
+        """
+        Deactivates gradient checkpointing for the current model.
+
+        Note that in other frameworks this feature can be referred to as "activation checkpointing" or "checkpoint
+        activations".
+        """
+        if self._supports_gradient_checkpointing:
+            self.apply(partial(self._set_gradient_checkpointing, value=False))
 
     def save_pretrained(
         self,
         save_directory: Union[str, os.PathLike],
         is_main_process: bool = True,
         save_function: Callable = torch.save,
-        **kwargs,
     ):
         """
         Save a model and its configuration file to a directory, so that it can be re-loaded using the
-        `[`~ModelMixin.from_pretrained`]` class method.
+        `[`~modeling_utils.ModelMixin.from_pretrained`]` class method.
 
         Arguments:
             save_directory (`str` or `os.PathLike`):
@@ -166,9 +180,6 @@ class ModelMixin(torch.nn.Module):
             save_function (`Callable`):
                 The function to use to save the state dictionary. Useful on distributed training like TPUs when one
                 need to replace `torch.save` by another method.
-
-            kwargs:
-                Additional key word arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
         """
         if os.path.isfile(save_directory):
             logger.error(f"Provided path ({save_directory}) should be a directory, not a file")
@@ -219,39 +230,16 @@ class ModelMixin(torch.nn.Module):
                 Can be either:
 
                     - A string, the *model id* of a pretrained model hosted inside a model repo on huggingface.co.
-                      Valid model ids can be located at the root-level, like `bert-base-uncased`, or namespaced under a
-                      user or organization name, like `dbmdz/bert-base-german-cased`.
-                    - A path to a *directory* containing model weights saved using [`~ModelMixin.save_pretrained`],
-                      e.g., `./my_model_directory/`.
+                      Valid model ids should have an organization name, like `google/ddpm-celebahq-256`.
+                    - A path to a *directory* containing model weights saved using [`~ModelMixin.save_config`], e.g.,
+                      `./my_model_directory/`.
 
-            config (`Union[ConfigMixin, str, os.PathLike]`, *optional*):
-                Can be either:
-
-                    - an instance of a class derived from [`ConfigMixin`],
-                    - a string or path valid as input to [`~ConfigMixin.from_pretrained`].
-
-                ConfigMixinuration for the model to use instead of an automatically loaded configuration.
-                ConfigMixinuration can be automatically loaded when:
-
-                    - The model is a model provided by the library (loaded with the *model id* string of a pretrained
-                      model).
-                    - The model was saved using [`~ModelMixin.save_pretrained`] and is reloaded by supplying the save
-                      directory.
-                    - The model is loaded by supplying a local directory as `pretrained_model_name_or_path` and a
-                      configuration JSON file named *config.json* is found in the directory.
             cache_dir (`Union[str, os.PathLike]`, *optional*):
                 Path to a directory in which a downloaded pretrained model configuration should be cached if the
                 standard cache should not be used.
-            from_tf (`bool`, *optional*, defaults to `False`):
-                Load the model weights from a TensorFlow checkpoint save file (see docstring of
-                `pretrained_model_name_or_path` argument).
-            from_flax (`bool`, *optional*, defaults to `False`):
-                Load the model weights from a Flax checkpoint save file (see docstring of
-                `pretrained_model_name_or_path` argument).
-            ignore_mismatched_sizes (`bool`, *optional*, defaults to `False`):
-                Whether or not to raise an error if some of the weights from the checkpoint do not have the same size
-                as the weights of the model (if for instance, you are instantiating a model with 10 labels from a
-                checkpoint with 3 labels).
+            torch_dtype (`str` or `torch.dtype`, *optional*):
+                Override the default `torch.dtype` and load the model under this dtype. If `"auto"` is passed the dtype
+                will be automatically derived from the model's weights.
             force_download (`bool`, *optional*, defaults to `False`):
                 Whether or not to force the (re-)download of the model weights and configuration files, overriding the
                 cached versions if they exist.
@@ -262,45 +250,36 @@ class ModelMixin(torch.nn.Module):
                 A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
                 'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
             output_loading_info(`bool`, *optional*, defaults to `False`):
-                Whether ot not to also return a dictionary containing missing keys, unexpected keys and error messages.
+                Whether or not to also return a dictionary containing missing keys, unexpected keys and error messages.
             local_files_only(`bool`, *optional*, defaults to `False`):
                 Whether or not to only look at local files (i.e., do not try to download the model).
             use_auth_token (`str` or *bool*, *optional*):
                 The token to use as HTTP bearer authorization for remote files. If `True`, will use the token generated
-                when running `transformers-cli login` (stored in `~/.huggingface`).
+                when running `diffusers-cli login` (stored in `~/.huggingface`).
             revision (`str`, *optional*, defaults to `"main"`):
                 The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
                 git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
                 identifier allowed by git.
+            subfolder (`str`, *optional*, defaults to `""`):
+                In case the relevant files are located inside a subfolder of the model repo (either remote in
+                huggingface.co or downloaded locally), you can specify the folder name here.
+
             mirror (`str`, *optional*):
                 Mirror source to accelerate downloads in China. If you are from China and have an accessibility
                 problem, you can set this option to resolve it. Note that we do not guarantee the timeliness or safety.
                 Please refer to the mirror site for more information.
 
-            kwargs (remaining dictionary of keyword arguments, *optional*):
-                Can be used to update the configuration object (after it being loaded) and initiate the model (e.g.,
-                `output_attentions=True`). Behaves differently depending on whether a `config` is provided or
-                automatically loaded:
-
-                    - If a configuration is provided with `config`, `**kwargs` will be directly passed to the
-                      underlying model's `__init__` method (we assume all relevant updates to the configuration have
-                      already been done)
-                    - If a configuration is not provided, `kwargs` will be first passed to the configuration class
-                      initialization function ([`~ConfigMixin.from_pretrained`]). Each key of `kwargs` that corresponds
-                      to a configuration attribute will be used to override said attribute with the supplied `kwargs`
-                      value. Remaining keys that do not correspond to any configuration attribute will be passed to the
-                      underlying model's `__init__` function.
-
         <Tip>
 
-        Passing `use_auth_token=True`` is required when you want to use a private model.
+         It is required to be logged in (`huggingface-cli login`) when you want to use private or [gated
+         models](https://huggingface.co/docs/hub/models-gated#gated-models).
 
         </Tip>
 
         <Tip>
 
-        Activate the special ["offline-mode"](https://huggingface.co/transformers/installation.html#offline-mode) to
-        use this method in a firewalled environment.
+        Activate the special ["offline-mode"](https://huggingface.co/diffusers/installation.html#offline-mode) to use
+        this method in a firewalled environment.
 
         </Tip>
 
@@ -314,36 +293,19 @@ class ModelMixin(torch.nn.Module):
         local_files_only = kwargs.pop("local_files_only", False)
         use_auth_token = kwargs.pop("use_auth_token", None)
         revision = kwargs.pop("revision", None)
-        from_auto_class = kwargs.pop("_from_auto", False)
         torch_dtype = kwargs.pop("torch_dtype", None)
         subfolder = kwargs.pop("subfolder", None)
+        device_map = kwargs.pop("device_map", None)
 
-        user_agent = {"file_type": "model", "framework": "pytorch", "from_auto_class": from_auto_class}
+        user_agent = {
+            "diffusers": __version__,
+            "file_type": "model",
+            "framework": "pytorch",
+        }
 
         # Load config if we don't provide a configuration
         config_path = pretrained_model_name_or_path
-        model, unused_kwargs = cls.from_config(
-            config_path,
-            cache_dir=cache_dir,
-            return_unused_kwargs=True,
-            force_download=force_download,
-            resume_download=resume_download,
-            proxies=proxies,
-            local_files_only=local_files_only,
-            use_auth_token=use_auth_token,
-            revision=revision,
-            subfolder=subfolder,
-            **kwargs,
-        )
 
-        if torch_dtype is not None and not isinstance(torch_dtype, torch.dtype):
-            raise ValueError(
-                f"{torch_dtype} needs to be of type `torch.dtype`, e.g. `torch.float16`, but is {type(torch_dtype)}."
-            )
-        elif torch_dtype is not None:
-            model = model.to(torch_dtype)
-
-        model.register_to_config(_name_or_path=pretrained_model_name_or_path)
         # This variable will flag if we're loading a sharded checkpoint. In this case the archive file is just the
         # Load model
         pretrained_model_name_or_path = str(pretrained_model_name_or_path)
@@ -373,6 +335,7 @@ class ModelMixin(torch.nn.Module):
                     use_auth_token=use_auth_token,
                     user_agent=user_agent,
                     subfolder=subfolder,
+                    revision=revision,
                 )
 
             except RepositoryNotFoundError:
@@ -380,7 +343,7 @@ class ModelMixin(torch.nn.Module):
                     f"{pretrained_model_name_or_path} is not a local folder and is not a valid model identifier "
                     "listed on 'https://huggingface.co/models'\nIf this is a private repository, make sure to pass a "
                     "token having permission to this repo with `use_auth_token` or log in with `huggingface-cli "
-                    "login` and pass `use_auth_token=True`."
+                    "login`."
                 )
             except RevisionNotFoundError:
                 raise EnvironmentError(
@@ -403,7 +366,7 @@ class ModelMixin(torch.nn.Module):
                     f" in the cached files and it looks like {pretrained_model_name_or_path} is not the path to a"
                     f" directory containing a file named {WEIGHTS_NAME} or"
                     " \nCheckout your internet connection or see how to run the library in"
-                    " offline mode at 'https://huggingface.co/docs/transformers/installation#offline-mode'."
+                    " offline mode at 'https://huggingface.co/docs/diffusers/installation#offline-mode'."
                 )
             except EnvironmentError:
                 raise EnvironmentError(
@@ -414,25 +377,81 @@ class ModelMixin(torch.nn.Module):
                 )
 
             # restore default dtype
-        state_dict = load_state_dict(model_file)
-        model, missing_keys, unexpected_keys, mismatched_keys, error_msgs = cls._load_pretrained_model(
-            model,
-            state_dict,
-            model_file,
-            pretrained_model_name_or_path,
-            ignore_mismatched_sizes=ignore_mismatched_sizes,
-        )
 
-        # Set model in evaluation mode to deactivate DropOut modules by default
-        model.eval()
+        if device_map == "auto":
+            if is_accelerate_available():
+                import accelerate
+            else:
+                raise ImportError("Please install accelerate via `pip install accelerate`")
 
-        if output_loading_info:
+            with accelerate.init_empty_weights():
+                model, unused_kwargs = cls.from_config(
+                    config_path,
+                    cache_dir=cache_dir,
+                    return_unused_kwargs=True,
+                    force_download=force_download,
+                    resume_download=resume_download,
+                    proxies=proxies,
+                    local_files_only=local_files_only,
+                    use_auth_token=use_auth_token,
+                    revision=revision,
+                    subfolder=subfolder,
+                    device_map=device_map,
+                    **kwargs,
+                )
+
+            accelerate.load_checkpoint_and_dispatch(model, model_file, device_map)
+
+            loading_info = {
+                "missing_keys": [],
+                "unexpected_keys": [],
+                "mismatched_keys": [],
+                "error_msgs": [],
+            }
+        else:
+            model, unused_kwargs = cls.from_config(
+                config_path,
+                cache_dir=cache_dir,
+                return_unused_kwargs=True,
+                force_download=force_download,
+                resume_download=resume_download,
+                proxies=proxies,
+                local_files_only=local_files_only,
+                use_auth_token=use_auth_token,
+                revision=revision,
+                subfolder=subfolder,
+                device_map=device_map,
+                **kwargs,
+            )
+
+            state_dict = load_state_dict(model_file)
+            model, missing_keys, unexpected_keys, mismatched_keys, error_msgs = cls._load_pretrained_model(
+                model,
+                state_dict,
+                model_file,
+                pretrained_model_name_or_path,
+                ignore_mismatched_sizes=ignore_mismatched_sizes,
+            )
+
             loading_info = {
                 "missing_keys": missing_keys,
                 "unexpected_keys": unexpected_keys,
                 "mismatched_keys": mismatched_keys,
                 "error_msgs": error_msgs,
             }
+
+        if torch_dtype is not None and not isinstance(torch_dtype, torch.dtype):
+            raise ValueError(
+                f"{torch_dtype} needs to be of type `torch.dtype`, e.g. `torch.float16`, but is {type(torch_dtype)}."
+            )
+        elif torch_dtype is not None:
+            model = model.to(torch_dtype)
+
+        model.register_to_config(_name_or_path=pretrained_model_name_or_path)
+
+        # Set model in evaluation mode to deactivate DropOut modules by default
+        model.eval()
+        if output_loading_info:
             return model, loading_info
 
         return model
