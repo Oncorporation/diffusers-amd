@@ -51,14 +51,15 @@ pipe.safety_checker = lambda images, **kwargs: (images, [False] * len(images))
 height = 592
 width = 592
 batch = 1
+numberToProcess = 25
 
 outputImagePath = Path(r"J:\AI\MechIcons")
 localuserPath = os.path.expanduser('~')
 baseImagePath = Path(localuserPath + r"\Saved Games\MechWarrior Online\UI\MechIcons")
 
 paths = sorted(Path(baseImagePath).iterdir(), key=os.path.getmtime, reverse=False)
-for path in paths[:25]:
-    print('\nProcessing Image#' + str(batch) + ' ' + path.name + '\n')
+for path in paths[:numberToProcess]:
+    print('\nProcessing Image#' + str(batch) + '/' + str(numberToProcess) + ' ' + path.name + '\n')
     i2i_update(path.name, baseImagePath, outputImagePath, height, width, pipe)
     gc.collect()
     batch += 1

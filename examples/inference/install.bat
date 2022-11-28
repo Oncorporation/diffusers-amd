@@ -9,14 +9,13 @@ rem pip install onnxruntime
 rem pip install onnx
 rem pip install torch
 rem pip install onnxruntime-directml --force-reinstall
-
-
+rem py venv/scripts/pip.exe install --upgrade pip
 
 
 py venv/scripts/pip.exe install diffusers==0.6.0 
 py venv/scripts/pip.exe install transformers[onnx]
-rem py venv/scripts/pip.exe install onnxruntime
-py venv/scripts/pip.exe install optimum[onnxruntime]
+py venv/scripts/pip.exe install onnxruntime
+rem py venv/scripts/pip.exe install optimum[onnxruntime]
 py venv/scripts/pip.exe install onnx
 py venv/scripts/pip.exe install torch
 py venv/scripts/pip.exe install onnxruntime-directml --force-reinstall

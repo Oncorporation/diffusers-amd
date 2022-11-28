@@ -1,0 +1,3 @@
+python .\convert_diffusers_to_sd.py --model_path "path to the folder with folders" --checkpoint_path "path to the output file"
+The model_path is the folder with the logs, tokenizer, text_encoder... folders and you need to specify the name of the output file with the .ckpt extension (or just rename it later) for example:
+python .\convert_diffusers_to_sd.py --model_path .\stable-diffusion-with-diffusers --checkpoint_path .\stable-diffusion.ckpt
